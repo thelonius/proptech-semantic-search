@@ -104,7 +104,7 @@ async def _run_one(
     r = await client.post(
         f"{endpoint}/search",
         json={"query": q.query, "top_k": top_k, "with_explain": False},
-        timeout=300.0,
+        timeout=600.0,  # cold start on 9B can exceed default 300s
     )
     r.raise_for_status()
     body = r.json()
@@ -241,7 +241,17 @@ async def _run_all(
     results: list[EvalResult] = []
     sem = asyncio.Semaphore(concurrency)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        # Pre-warm: one throwaway request so the LLM is in memory
+        # before we start the timed eval.
+        console.print("[yellow]Warming up LLM (may take 30-60s on cold start)...[/yellow]")
+        try:
+            await _run_one(client, endpoint, qs[0], top_k)
+            console.print("[green]✓ Warmup complete[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warmup failed ({e}), proceeding anyway[/yellow]")
+
+
         async def _one(q: EvalQuery) -> EvalResult:
             async with sem:
                 return await _run_one(client, endpoint, q, top_k)

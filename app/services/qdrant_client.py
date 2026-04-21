@@ -104,14 +104,14 @@ class QdrantService:
 
         start = time.perf_counter()
         try:
-            hits = await self._client.search(
+            res = await self._client.query_points(
                 collection_name=self._collection,
-                query_vector=vector,
+                query=vector,
                 query_filter=flt,
                 limit=top_k,
-                search_params=None,
                 with_payload=True,
             )
+            hits = res.points
         finally:
             metrics.qdrant_search_duration_seconds.observe(time.perf_counter() - start)
 

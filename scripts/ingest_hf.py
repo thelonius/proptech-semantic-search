@@ -130,9 +130,20 @@ async def _ingest(limit: int, recreate: bool, batch_size: int) -> None:
 
     llm = get_llm()
 
-    rows = await _load_dataset(limit)
-    console.print(f"[green]Loaded {len(rows)} rows[/green]")
+    try:
 
+        rows = await _load_dataset(limit)
+        console.print(f"[green]Loaded {len(rows)} rows[/green]")
+
+        await _ingest_rows(qdrant, llm, rows, batch_size)
+    finally:
+        await close_llm()
+        await close_qdrant()
+
+
+async def _ingest_rows(
+    qdrant: Any, llm: Any, rows: list[dict[str, Any]], batch_size: int
+) -> None:
     with Progress(
         SpinnerColumn(),
         TextColumn("[bold cyan]{task.description}[/bold cyan]"),
@@ -180,11 +191,7 @@ def main(
     batch_size: int = typer.Option(8, help="Batch size for embeddings"),
 ) -> None:
     """Ingest properties from HuggingFace dataset into Qdrant."""
-    try:
-        asyncio.run(_ingest(limit=limit, recreate=recreate, batch_size=batch_size))
-    finally:
-        asyncio.run(close_llm())
-        asyncio.run(close_qdrant())
+    asyncio.run(_ingest(limit=limit, recreate=recreate, batch_size=batch_size))
 
 
 if __name__ == "__main__":
