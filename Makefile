@@ -55,11 +55,11 @@ ps:  ## Infra status
 
 .PHONY: dev
 dev:  ## Run app (uvicorn, reload)
-	$(PY) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	$(PY) -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
 .PHONY: run
 run:  ## Run app (production mode)
-	$(PY) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+	$(PY) -m uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 2
 
 # ---------- data / eval ----------
 
@@ -73,7 +73,7 @@ eval:  ## Run eval harness (precision@5, recall@10, MRR)
 
 .PHONY: search
 search:  ## Ad-hoc search: make search Q="family with kids and dog"
-	@curl -s -X POST http://localhost:8000/search \
+	@curl -s -X POST http://localhost:8002/search \
 		-H 'Content-Type: application/json' \
 		-d '{"query": "$(Q)"}' | jq .
 
