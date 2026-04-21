@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Data / caches
+data/
+*.parquet
+*.arrow
+hf_cache/
+models_cache/
+
+# Runtime
+logs/
+*.log
+tmp/
+
+# Qdrant local storage (if any local mode used)
+qdrant_storage/
+
+# Eval outputs (keep structure, ignore large artifacts)
+evals/results/*.json
+evals/results/*.parquet
+!evals/results/.gitkeep

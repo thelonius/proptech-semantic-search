@@ -1,0 +1,89 @@
+# Eval queries for lifestyle-based real-estate search.
+#
+# Structure:
+#   queries:
+#     - id: <slug>
+#       query: "<natural-language search>"
+#       relevant: [<property_id>, ...]   # full credit if present in top-K
+#       partial:  [<property_id>, ...]   # half credit
+#       notes: "<why these are gold>"
+#
+# Labels are EMPTY at bootstrap. Fill after first ingestion via:
+#   python -m scripts.label_queries --auto   (LLM-assisted; human review)
+#
+# Dataset: Binaryy/multimodal-real-estate-search (Lagos, Abuja, etc.)
+# Queries deliberately span: household types, purchase intent, lifestyle cues,
+# price sensitivity, location hints.
+
+queries:
+  # --- family scenarios ---
+  - id: family_two_kids_dog
+    query: "Family with two kids and a dog looking for a quiet house with a backyard"
+    relevant: []
+    notes: "Looking for detached houses with yards, not apartments."
+
+  - id: family_with_pool
+    query: "Young family of four wants a modern house with a pool and space for kids to play"
+    relevant: []
+    notes: "Detached duplex / villa, pool mentioned."
+
+  - id: big_family_budget
+    query: "Big family (5 bedrooms) in Lagos, budget around 500K USD, good neighborhood"
+    relevant: []
+    notes: "5+ bedrooms, price filter."
+
+  # --- elderly / accessibility ---
+  - id: elderly_single_floor
+    query: "Looking for a place for elderly parents — single floor, no stairs, close to clinic"
+    relevant: []
+    notes: "Bungalow or ground floor apartment."
+
+  - id: retirement_quiet
+    query: "Retired couple, quiet neighborhood, doesn't need to be flashy, small garden nice"
+    relevant: []
+
+  # --- young professional / remote ---
+  - id: remote_worker_quiet
+    query: "Remote software engineer, needs a quiet home office and reliable area"
+    relevant: []
+
+  - id: single_modern_apt
+    query: "Young professional, single, wants a modern 1-bedroom apartment in a lively area"
+    relevant: []
+
+  - id: couple_first_home
+    query: "Newlywed couple buying first home, 2-bedroom, nothing fancy, good area"
+    relevant: []
+
+  # --- investor ---
+  - id: investor_rental
+    query: "Investor looking for a rental property that can attract students or young workers"
+    relevant: []
+    notes: "Typically flats / smaller units in good areas."
+
+  - id: investor_luxury
+    query: "Luxury investment property in Lekki or Ikoyi, premium finish, short-let potential"
+    relevant: []
+
+  # --- student ---
+  - id: student_affordable
+    query: "Student looking for affordable accommodation, shared or mini-flat, near university"
+    relevant: []
+
+  # --- location-driven ---
+  - id: lagos_victoria_island
+    query: "Apartment on Victoria Island, close to the business district"
+    relevant: []
+
+  - id: abuja_maitama
+    query: "House in Maitama, Abuja, executive neighborhood"
+    relevant: []
+
+  # --- lifestyle cues ---
+  - id: pet_friendly_outdoor
+    query: "Pet-friendly, outdoor space, gated compound, safe for dogs"
+    relevant: []
+
+  - id: newly_built_modern
+    query: "Newly built, modern interior, fitted kitchen, ready to move in"
+    relevant: []
