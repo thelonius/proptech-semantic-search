@@ -1,0 +1,22 @@
+# Subset of queries used for labeling demo.
+# Full list lives in queries.yaml; here we take three diverse scenarios
+# (family / elderly / investor-luxury) for a fast gold-label bootstrap.
+
+queries:
+  - id: family_two_kids_dog
+    query: "Family with two kids and a dog looking for a quiet house with a backyard"
+    relevant: []
+    partial: []
+    notes: "family with kids+pet — should prefer detached houses / duplexes with yards"
+
+  - id: elderly_single_floor
+    query: "Looking for a place for elderly parents — single floor, no stairs, close to clinic"
+    relevant: []
+    partial: []
+    notes: "elderly — ground-floor / bungalow preferred"
+
+  - id: investor_luxury
+    query: "Luxury investment property in Lekki or Ikoyi, premium finish, short-let potential"
+    relevant: []
+    partial: []
+    notes: "investor + location-specific — Lekki/Ikoyi premium properties"

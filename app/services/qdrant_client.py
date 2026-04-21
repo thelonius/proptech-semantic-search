@@ -81,6 +81,13 @@ class QdrantService:
     ) -> list[dict[str, Any]]:
         """Hybrid: hard filter (payload) + dense retrieval (cosine).
 
+        Hard filters ONLY for structured numeric payload (price, rooms). Free-text
+        fields like `preferred_locations` are left to the embedding — LLMs often
+        emit noisy tokens there ("quiet", "house with backyard") that don't exist
+        as real location values and would wipe the result set under a Qdrant
+        `should` filter. Location hints are absorbed into the vector upstream by
+        `_compose_retrieval_text`.
+
         Returns list of {id, score, payload}.
         """
         must: list[FieldCondition] = []
@@ -91,16 +98,11 @@ class QdrantService:
         if max_rooms is not None:
             must.append(FieldCondition(key="rooms", range=Range(lte=max_rooms)))
 
-        should: list[FieldCondition] = []
-        if preferred_locations:
-            for loc in preferred_locations[:5]:
-                should.append(
-                    FieldCondition(key="location_norm", match=MatchValue(value=loc.lower()))
-                )
+        # NOTE: `preferred_locations` intentionally not used as a hard filter
+        # here — see docstring above.
+        _ = preferred_locations  # consumed upstream in _compose_retrieval_text
 
-        flt: Filter | None = None
-        if must or should:
-            flt = Filter(must=must or None, should=should or None)
+        flt: Filter | None = Filter(must=must) if must else None
 
         start = time.perf_counter()
         try:

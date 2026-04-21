@@ -20,20 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import typer
 import yaml
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
+import sys
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
@@ -144,51 +138,78 @@ async def _label(
     total_batches = len(queries) * ((len(props) + batch_size - 1) // batch_size)
     updated_queries: list[dict[str, Any]] = []
 
+    def log(msg: str) -> None:
+        # Plain print with immediate flush — friendly to log files (unlike rich.Progress)
+        print(msg, flush=True)
+        sys.stdout.flush()
+
+    log(f"[labeling] queries={len(queries)}  properties={len(props)}  "
+        f"batch_size={batch_size}  total_batches={total_batches}")
+    log(f"[labeling] incremental write -> {out_path}")
+
+    def _write_incremental() -> None:
+        """Write whatever we've labeled so far. Called after each query so a
+        crash / timeout doesn't lose the earlier batches' work."""
+        out_path.write_text(
+            yaml.safe_dump(
+                {"queries": updated_queries}, sort_keys=False, allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+    batch_n = 0
     try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Labeling", total=total_batches)
+        for q_idx, q in enumerate(queries, 1):
+            q_id = str(q["id"])
+            query_text = str(q["query"])
+            relevant: list[str] = []
+            partial: list[str] = []
 
-            for q in queries:
-                q_id = str(q["id"])
-                query_text = str(q["query"])
-                progress.update(task, description=f"[bold cyan]{q_id}[/bold cyan]")
-
-                relevant: list[str] = []
-                partial: list[str] = []
-
-                for start in range(0, len(props), batch_size):
-                    chunk = props[start : start + batch_size]
-                    judgments = await _judge_batch(llm, query_text, chunk)
-                    # Normalize ids (LLM may return str or int)
-                    by_id = {str(j.get("id")): j for j in judgments if "id" in j}
-                    for p in chunk:
-                        j = by_id.get(str(p["id"]))
-                        if not j:
-                            continue
-                        label = j.get("label", "not_relevant")
-                        if label == "relevant":
-                            relevant.append(str(p["id"]))
-                        elif label == "partial":
-                            partial.append(str(p["id"]))
-                    progress.update(task, advance=1)
-
-                updated_queries.append(
-                    {
-                        "id": q_id,
-                        "query": query_text,
-                        "relevant": sorted(set(relevant), key=int),
-                        "partial": sorted(set(partial), key=int),
-                        "notes": str(q.get("notes", "") or "auto-labeled, REVIEW BEFORE USE"),
-                    }
+            for start in range(0, len(props), batch_size):
+                batch_n += 1
+                chunk = props[start : start + batch_size]
+                t0 = time.monotonic()
+                judgments = await _judge_batch(llm, query_text, chunk)
+                dt_s = time.monotonic() - t0
+                # Normalize ids (LLM may return str or int)
+                by_id = {str(j.get("id")): j for j in judgments if "id" in j}
+                batch_rel = 0
+                batch_par = 0
+                for p in chunk:
+                    j = by_id.get(str(p["id"]))
+                    if not j:
+                        continue
+                    label = j.get("label", "not_relevant")
+                    if label == "relevant":
+                        relevant.append(str(p["id"]))
+                        batch_rel += 1
+                    elif label == "partial":
+                        partial.append(str(p["id"]))
+                        batch_par += 1
+                log(
+                    f"  [{batch_n}/{total_batches}] q={q_id} "
+                    f"props={start}-{start+len(chunk)} "
+                    f"rel={batch_rel} par={batch_par} took={dt_s:.1f}s"
                 )
+
+            log(
+                f"[query {q_idx}/{len(queries)}] {q_id}: "
+                f"relevant={len(relevant)} partial={len(partial)}"
+            )
+            updated_queries.append(
+                {
+                    "id": q_id,
+                    "query": query_text,
+                    "relevant": sorted(set(relevant), key=int),
+                    "partial": sorted(set(partial), key=int),
+                    "notes": str(q.get("notes", "") or "auto-labeled, REVIEW BEFORE USE"),
+                }
+            )
+            # Checkpoint after each query — don't lose work on crash/timeout
+            _write_incremental()
     finally:
+        # Final write in case of crash before completion
+        _write_incremental()
         await close_llm()
         await close_qdrant()
 

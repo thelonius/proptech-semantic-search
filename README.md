@@ -1,36 +1,40 @@
 # PropTech Semantic Search — Demo
 
-Lifestyle-based real estate matching: natural language query → multi-vector retrieval (text + image) → LLM rerank with explanations.
+Lifestyle-based real-estate matching: natural-language query → LLM intent parsing → multi-vector retrieval (Qdrant) → (upcoming) LLM rerank with explanations.
 
-Built as a **portfolio demo** for the Spacenplace AI/ML Engineer role. Focus: production-grade plumbing (cost tracking, observability, graceful degradation, evaluation harness) — not feature count.
+Built as a **portfolio demo** for an AI/ML Engineer role at Spacenplace (PropTech). Focus: production-grade plumbing (cost tracking, observability, multi-provider LLM, evaluation harness) — not feature count.
 
 ## Status
 
-🟢 **Working end-to-end.** Search pipeline is live; further polish in progress.
+🟢 **Working end-to-end on 3 LLM providers.**
 
 | Stage | Status |
 |---|---|
 | Scaffold (FastAPI, Docker infra, Makefile) | ✅ |
-| Cost middleware + Prometheus metrics | ✅ |
-| Ollama LLM client (qwen3.5:9b + nomic-embed-text) | ✅ |
+| Cost middleware (real + shadow OpenAI + shadow NIM) | ✅ |
+| Prometheus metrics for every layer | ✅ |
+| Multi-provider LLM: Ollama / NIM / OpenAI (split LLM vs embed) | ✅ |
 | Intent parsing (stage 1) | ✅ |
 | HF dataset ingestion (100 properties, Nigerian real estate) | ✅ |
 | Qdrant retrieval (stage 2, cosine + hard filters) | ✅ |
-| Eval harness (precision@K, recall@K, MRR, cost summary) | ✅ |
-| LLM-assisted gold labeler (`scripts/label_queries.py`) | ✅ |
+| Eval harness (precision@K, recall@K, MRR, cost, side-by-side providers) | ✅ |
+| Provider-benchmark eval reports (Ollama vs NIM) | ✅ |
+| LLM-assisted gold labeler (`scripts/label_queries.py`) with checkpointing | ✅ |
 | LLM reranker (stage 3) | ⏳ |
 | Grafana cost dashboard | ⏳ |
-| k6 load test | ⏳ |
-| Chaos/failure-mode tests | ⏳ |
-| Scaling + cost-breakdown docs | ⏳ |
+| k6 load test + chaos tests | ⏳ |
 
-## Design highlights
+## Highlights
 
-- **100% local LLM** (Ollama on Apple Silicon) → $0 real cost
-- **Cost observability**: every response carries `X-Cost-USD` + `X-Cost-Shadow-OpenAI-USD` headers
-  (real cost vs what it would have cost on OpenAI — proves the value of self-hosting)
-- **Structured JSON logs** with request-id correlation
+- **Multi-provider LLM** in one codebase: `LLM_PROVIDER=ollama|nim|openai`
+- **Split chat / embed routing** (`EMBED_PROVIDER` separate, sticky to Qdrant vector dim)
+- **Cost tracking every request**:
+  `X-Cost-USD` (real), `X-Cost-Shadow-OpenAI-USD`, `X-Cost-Shadow-NIM-USD`
+  — founders see what they pay now vs each alternative on the same workload
+- **Structured JSON logs** with `request_id` correlation
 - **Prometheus metrics** for every layer: HTTP, LLM (tokens/cost/latency), Qdrant, cache
+- **Eval harness** writes diff-friendly Markdown reports (`evals/results/*.md`)
+- **Architecture Decision Records** in `docs/adr/`
 
 ## Quickstart
 
@@ -65,6 +69,23 @@ X-LLM-Tokens-In: 367
 X-LLM-Tokens-Out: 185
 X-Duration-Ms: 31148.2
 ```
+
+## Provider benchmark (same 15 queries, same dataset)
+
+Verified end-to-end with both providers. Both reports are checked in under
+`evals/results/` — Markdown format, diff-friendly.
+
+| Metric | **Ollama** (qwen3.5:9b, local M1) | **NIM** (llama-3.1-8b, cloud GPU) | Ratio |
+|---|---|---|---|
+| Mean latency | 42 254 ms | 1 908 ms | **22× faster** |
+| Median latency | 39 722 ms | 1 509 ms | **26× faster** |
+| Success rate | 12/15 (80%) | 15/15 (100%) | — |
+| Real cost (15 queries) | **$0.000000** | $0.000589 | — |
+| Shadow OpenAI (same load) | $0.002137 | $0.001892 | NIM is **3.2× cheaper than OpenAI** |
+
+Pick Ollama for dev / privacy / zero-cost experiments.
+Pick NIM for low-latency prod at a fraction of OpenAI's bill.
+OpenAI stays available as a compatibility target.
 
 Response body includes the parsed intent:
 
