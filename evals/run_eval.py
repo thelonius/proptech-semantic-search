@@ -52,6 +52,7 @@ class EvalResult:
     shadow_openai_usd: float
     latency_ms: float
     stages_ms: dict[str, float]
+    error: str | None = None
 
     def hit_ids(self) -> list[str]:
         return [str(h["property_id"]) for h in self.hits]
@@ -101,12 +102,32 @@ def _load_queries(path: Path) -> list[EvalQuery]:
 async def _run_one(
     client: httpx.AsyncClient, endpoint: str, q: EvalQuery, top_k: int
 ) -> EvalResult:
-    r = await client.post(
-        f"{endpoint}/search",
-        json={"query": q.query, "top_k": top_k, "with_explain": False},
-        timeout=600.0,  # cold start on 9B can exceed default 300s
-    )
-    r.raise_for_status()
+    """Run one query. NEVER raises — always returns an EvalResult (maybe with .error)."""
+    try:
+        r = await client.post(
+            f"{endpoint}/search",
+            json={"query": q.query, "top_k": top_k, "with_explain": False},
+            timeout=600.0,  # cold start on 9B can exceed default 300s
+        )
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        return EvalResult(
+            q=q, hits=[], intent={}, cost_usd=0.0, shadow_openai_usd=0.0,
+            latency_ms=0.0, stages_ms={}, error=f"{type(e).__name__}: {e}",
+        )
+
+    if r.status_code >= 400:
+        # Still pick up what metadata we can from headers
+        return EvalResult(
+            q=q,
+            hits=[],
+            intent={},
+            cost_usd=float(r.headers.get("X-Cost-USD", 0.0) or 0.0),
+            shadow_openai_usd=float(r.headers.get("X-Cost-Shadow-OpenAI-USD", 0.0) or 0.0),
+            latency_ms=float(r.headers.get("X-Duration-Ms", 0.0) or 0.0),
+            stages_ms={},
+            error=f"HTTP {r.status_code}: {r.text[:200]}",
+        )
+
     body = r.json()
     return EvalResult(
         q=q,
@@ -132,16 +153,19 @@ def _aggregate(results: list[EvalResult], ks: list[int]) -> dict[str, Any]:
             "max": round(max(vals), 4),
         }
 
+    ok = [r for r in results if r.error is None]
     agg: dict[str, Any] = {
         "n_queries": len(results),
-        "mrr": m([r.reciprocal_rank() for r in results]),
+        "n_ok": len(ok),
+        "n_failed": len(results) - len(ok),
+        "mrr": m([r.reciprocal_rank() for r in ok]),
         "cost_real_usd": round(sum(r.cost_usd for r in results), 6),
         "cost_shadow_openai_usd": round(sum(r.shadow_openai_usd for r in results), 6),
-        "latency_ms": m([r.latency_ms for r in results]),
+        "latency_ms": m([r.latency_ms for r in ok]),
     }
     for k in ks:
-        agg[f"precision@{k}"] = m([r.precision_at(k) for r in results])
-        agg[f"recall@{k}"] = m([r.recall_at(k) for r in results])
+        agg[f"precision@{k}"] = m([r.precision_at(k) for r in ok])
+        agg[f"recall@{k}"] = m([r.recall_at(k) for r in ok])
     return agg
 
 
@@ -190,15 +214,20 @@ def _write_markdown(
         pct = (savings / agg["cost_shadow_openai_usd"]) * 100
         lines.append(f"- **Savings vs OpenAI: ${savings:.6f} ({pct:.1f}%)**")
     lines.append("")
+    lines.append(f"- Successful: {agg['n_ok']} / {agg['n_queries']}")
+    if agg["n_failed"]:
+        lines.append(f"- **Failed: {agg['n_failed']}**")
+    lines.append("")
     lines.append("## Per-query")
     lines.append("")
-    lines.append("| id | p@1 | p@5 | r@10 | MRR | latency_ms | cost$ (shadow) |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| id | p@1 | p@5 | r@10 | MRR | latency_ms | cost$ (shadow) | status |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for r in results:
+        status = "✓" if r.error is None else f"✗ {r.error[:40]}"
         lines.append(
             f"| {r.q.id} | {r.precision_at(1):.2f} | {r.precision_at(5):.2f} | "
             f"{r.recall_at(10):.2f} | {r.reciprocal_rank():.2f} | "
-            f"{r.latency_ms:.0f} | {r.shadow_openai_usd:.6f} |"
+            f"{r.latency_ms:.0f} | {r.shadow_openai_usd:.6f} | {status} |"
         )
     lines.append("")
 

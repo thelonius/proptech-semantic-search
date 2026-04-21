@@ -13,6 +13,7 @@ For OpenAI we use `tiktoken` as fallback if the API doesn't return usage.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -49,6 +50,50 @@ def _count_tokens_openai(text: str, model: str = "gpt-4o-mini") -> int:
 
 class LLMError(Exception):
     pass
+
+
+# Invalid JSON control chars — anything < 0x20 except tab/newline/CR
+_INVALID_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# Accidental markdown fences around JSON
+_MD_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _parse_json_loose(text: str) -> dict[str, Any]:
+    """Parse JSON that LLMs might mangle.
+
+    Strategy:
+      1. Try as-is.
+      2. Strip markdown fences.
+      3. Strip stray control chars inside strings.
+      4. Extract outermost {...} block and retry.
+    """
+    if not text:
+        raise LLMError("LLM returned empty content")
+
+    candidates: list[str] = [text]
+    fence_stripped = _MD_FENCE.sub("", text).strip()
+    if fence_stripped != text:
+        candidates.append(fence_stripped)
+    candidates.append(_INVALID_CTRL.sub(" ", fence_stripped))
+
+    # Last ditch: extract first {...} balanced block
+    brace_start = fence_stripped.find("{")
+    brace_end = fence_stripped.rfind("}")
+    if brace_start >= 0 and brace_end > brace_start:
+        candidates.append(
+            _INVALID_CTRL.sub(" ", fence_stripped[brace_start : brace_end + 1])
+        )
+
+    last_err: Exception | None = None
+    for candidate in candidates:
+        try:
+            result = json.loads(candidate)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError as e:
+            last_err = e
+    logger.warning("llm_json_parse_failed", preview=text[:400], error=str(last_err))
+    raise LLMError(f"LLM returned invalid JSON: {last_err}")
 
 
 class OllamaClient:
@@ -203,17 +248,20 @@ class OllamaClient:
         user: str,
         temperature: float = 0.0,
     ) -> dict[str, Any]:
-        """Convenience: chat in JSON mode and parse result."""
+        """Convenience: chat in JSON mode and parse result.
+
+        Robust to common LLM JSON failure modes:
+        - Stray markdown fences (```json ... ```)
+        - Raw control characters inside strings (e.g. \\x0b from Qwen)
+        - Trailing commas
+        """
         out = await self.chat(
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             json_mode=True,
             temperature=temperature,
         )
-        try:
-            return json.loads(out["content"])
-        except json.JSONDecodeError as e:
-            logger.warning("llm_json_parse_failed", content=out["content"][:400])
-            raise LLMError(f"LLM returned invalid JSON: {e}") from e
+        content = out["content"]
+        return _parse_json_loose(content)
 
 
 # ---------- singleton ----------

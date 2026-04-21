@@ -6,20 +6,23 @@ Built as a **portfolio demo** for the Spacenplace AI/ML Engineer role. Focus: pr
 
 ## Status
 
-🚧 **In progress.** This is a live development branch.
+🟢 **Working end-to-end.** Search pipeline is live; further polish in progress.
 
 | Stage | Status |
 |---|---|
-| Scaffold (FastAPI, Docker infra, Makefile) | ✅ done |
-| Cost middleware + Prometheus metrics | ✅ done |
-| Ollama LLM client (qwen3.5:9b + nomic-embed-text) | ✅ done |
-| Intent parsing (stage 1 of pipeline) | ✅ done |
-| HF dataset ingestion | ⏳ next |
-| Qdrant retrieval (stage 2) | ⏳ next |
+| Scaffold (FastAPI, Docker infra, Makefile) | ✅ |
+| Cost middleware + Prometheus metrics | ✅ |
+| Ollama LLM client (qwen3.5:9b + nomic-embed-text) | ✅ |
+| Intent parsing (stage 1) | ✅ |
+| HF dataset ingestion (100 properties, Nigerian real estate) | ✅ |
+| Qdrant retrieval (stage 2, cosine + hard filters) | ✅ |
+| Eval harness (precision@K, recall@K, MRR, cost summary) | ✅ |
+| LLM-assisted gold labeler (`scripts/label_queries.py`) | ✅ |
 | LLM reranker (stage 3) | ⏳ |
-| Eval harness (precision@5, recall@10, MRR) | ⏳ next |
+| Grafana cost dashboard | ⏳ |
 | k6 load test | ⏳ |
-| ADR docs | ⏳ |
+| Chaos/failure-mode tests | ⏳ |
+| Scaling + cost-breakdown docs | ⏳ |
 
 ## Design highlights
 
@@ -34,25 +37,70 @@ Built as a **portfolio demo** for the Spacenplace AI/ML Engineer role. Focus: pr
 Requires: Python 3.11+, Docker Desktop, Ollama with `qwen3.5:9b` + `nomic-embed-text`.
 
 ```bash
-make install              # venv + deps
+make install              # venv + base deps
+make install-ml           # torch, transformers, datasets (only for ingestion)
 make env                  # copy .env.example → .env
 make up                   # start infra (Qdrant, Redis, Prometheus, Grafana)
+make ingest               # load 100 Nigerian real-estate listings into Qdrant
 make dev                  # run FastAPI with reload
 ```
 
 Open http://localhost:8000/docs — try `POST /search` with:
 
 ```json
-{ "query": "family with kids and a dog looking for a house with a yard" }
+{
+  "query": "Family with two kids and a dog looking for a quiet house with a backyard",
+  "top_k": 5
+}
 ```
 
-Response headers show per-request cost:
+Response headers show per-request cost and plumbing:
 
 ```
-X-Cost-USD: 0.000000
-X-Cost-Shadow-OpenAI-USD: 0.004287
-X-LLM-Tokens-In: 412
-X-LLM-Tokens-Out: 138
+X-Request-ID: a84de388401b40a8
+X-Cost-USD: 0.000000          # we ran it locally
+X-Cost-Shadow-OpenAI-USD: 0.000161   # what OpenAI would have charged
+X-LLM-Calls: 2
+X-LLM-Tokens-In: 367
+X-LLM-Tokens-Out: 185
+X-Duration-Ms: 31148.2
+```
+
+Response body includes the parsed intent:
+
+```json
+{
+  "intent": {
+    "household": "family_with_children",
+    "pets": ["dog"],
+    "implicit_needs": ["park_nearby", "quiet", "school_nearby"],
+    "style_preferences": ["quiet"],
+    "rationale": "User mentions family with kids and a dog..."
+  },
+  "hits": [
+    { "property_id": "85", "title": "5 bedroom detached duplex for sale",
+      "location": "Opebi, Ikeja, Lagos", "score": 0.611 },
+    ...
+  ],
+  "stages_ms": { "intent_ms": 30200, "retrieval_ms": 938 }
+}
+```
+
+## Eval harness
+
+```bash
+make eval                 # runs evals/queries.yaml, writes evals/results/<ts>.md
+```
+
+Output metrics per query: `precision@K`, `recall@K`, `MRR`, `latency`, `cost`.
+Reports are markdown so they diff nicely in git. Real and shadow-OpenAI cost
+are rolled up side-by-side — the "savings from local LLM" line is the headline.
+
+To bootstrap gold labels (which properties are relevant for each query):
+
+```bash
+.venv/bin/python -m scripts.label_queries --limit-properties 100
+# review evals/queries.labeled.yaml, then move it onto queries.yaml
 ```
 
 ## Stack
