@@ -68,8 +68,18 @@ ingest:  ## Ingest HF dataset into Qdrant (100 properties)
 	$(PY) -m scripts.ingest_hf --limit 100
 
 .PHONY: eval
-eval:  ## Run eval harness (precision@5, recall@10, MRR)
-	$(PY) -m evals.run_eval
+eval:  ## Eval on labeled subset (real metrics)
+	$(PY) -m evals.run_eval \
+		--queries evals/queries_subset.labeled.yaml \
+		--endpoint http://127.0.0.1:8002 \
+		--top-k 10 --concurrency 2 --json-out
+
+.PHONY: eval-full
+eval-full:  ## Eval on full 15-query set (mostly unlabeled — latency/cost benchmark)
+	$(PY) -m evals.run_eval \
+		--queries evals/queries.yaml \
+		--endpoint http://127.0.0.1:8002 \
+		--top-k 10 --concurrency 2 --json-out
 
 .PHONY: search
 search:  ## Ad-hoc search: make search Q="family with kids and dog"
