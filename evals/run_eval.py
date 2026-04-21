@@ -50,6 +50,7 @@ class EvalResult:
     intent: dict[str, Any]
     cost_usd: float
     shadow_openai_usd: float
+    shadow_nim_usd: float
     latency_ms: float
     stages_ms: dict[str, float]
     error: str | None = None
@@ -112,7 +113,8 @@ async def _run_one(
     except (httpx.TimeoutException, httpx.TransportError) as e:
         return EvalResult(
             q=q, hits=[], intent={}, cost_usd=0.0, shadow_openai_usd=0.0,
-            latency_ms=0.0, stages_ms={}, error=f"{type(e).__name__}: {e}",
+            shadow_nim_usd=0.0, latency_ms=0.0, stages_ms={},
+            error=f"{type(e).__name__}: {e}",
         )
 
     if r.status_code >= 400:
@@ -123,6 +125,7 @@ async def _run_one(
             intent={},
             cost_usd=float(r.headers.get("X-Cost-USD", 0.0) or 0.0),
             shadow_openai_usd=float(r.headers.get("X-Cost-Shadow-OpenAI-USD", 0.0) or 0.0),
+            shadow_nim_usd=float(r.headers.get("X-Cost-Shadow-NIM-USD", 0.0) or 0.0),
             latency_ms=float(r.headers.get("X-Duration-Ms", 0.0) or 0.0),
             stages_ms={},
             error=f"HTTP {r.status_code}: {r.text[:200]}",
@@ -136,6 +139,9 @@ async def _run_one(
         cost_usd=float(r.headers.get("X-Cost-USD", body.get("cost_usd", 0.0))),
         shadow_openai_usd=float(
             r.headers.get("X-Cost-Shadow-OpenAI-USD", body.get("shadow_openai_usd", 0.0))
+        ),
+        shadow_nim_usd=float(
+            r.headers.get("X-Cost-Shadow-NIM-USD", body.get("shadow_nim_usd", 0.0))
         ),
         latency_ms=float(r.headers.get("X-Duration-Ms", body.get("latency_ms", 0.0))),
         stages_ms=body.get("stages_ms", {}),
@@ -161,6 +167,7 @@ def _aggregate(results: list[EvalResult], ks: list[int]) -> dict[str, Any]:
         "mrr": m([r.reciprocal_rank() for r in ok]),
         "cost_real_usd": round(sum(r.cost_usd for r in results), 6),
         "cost_shadow_openai_usd": round(sum(r.shadow_openai_usd for r in results), 6),
+        "cost_shadow_nim_usd": round(sum(r.shadow_nim_usd for r in results), 6),
         "latency_ms": m([r.latency_ms for r in ok]),
     }
     for k in ks:
@@ -176,12 +183,18 @@ def _write_markdown(
     ks: list[int],
     agg: dict[str, Any],
     results: list[EvalResult],
+    provider_info: dict[str, str] | None = None,
 ) -> None:
     lines: list[str] = []
     lines.append(f"# Eval report — {dt.datetime.now(dt.UTC).isoformat(timespec='seconds')}")
     lines.append("")
     lines.append(f"- Endpoint: `{endpoint}`")
     lines.append(f"- Queries: `{queries_path}` ({agg['n_queries']})")
+    if provider_info:
+        lines.append(
+            f"- Providers: LLM=**{provider_info.get('llm','?')}**  "
+            f"Embed=**{provider_info.get('embed','?')}**"
+        )
     lines.append("")
     lines.append("## Aggregate metrics")
     lines.append("")
@@ -205,14 +218,24 @@ def _write_markdown(
         f"| latency_ms | {lat['mean']:.1f} | {lat['median']:.1f} | {lat['min']:.1f} | {lat['max']:.1f} |"
     )
     lines.append("")
-    lines.append("## Cost")
+    lines.append("## Cost (side-by-side, same workload)")
     lines.append("")
-    lines.append(f"- Real (Ollama, local): **${agg['cost_real_usd']:.6f}**")
-    lines.append(f"- Shadow on OpenAI:      **${agg['cost_shadow_openai_usd']:.6f}**")
-    if agg["cost_shadow_openai_usd"] > 0:
-        savings = agg["cost_shadow_openai_usd"] - agg["cost_real_usd"]
-        pct = (savings / agg["cost_shadow_openai_usd"]) * 100
-        lines.append(f"- **Savings vs OpenAI: ${savings:.6f} ({pct:.1f}%)**")
+    provider = (provider_info or {}).get("llm", "?")
+    lines.append("| Provider | Total USD | per-query USD | Notes |")
+    lines.append("|---|---|---|---|")
+    n = max(1, agg["n_ok"])
+    lines.append(
+        f"| **Active ({provider})** | ${agg['cost_real_usd']:.6f} | "
+        f"${agg['cost_real_usd']/n:.6f} | what we actually paid |"
+    )
+    lines.append(
+        f"| Shadow NIM (llama-3.1-8b) | ${agg['cost_shadow_nim_usd']:.6f} | "
+        f"${agg['cost_shadow_nim_usd']/n:.6f} | hypothetical same load |"
+    )
+    lines.append(
+        f"| Shadow OpenAI (gpt-4o-mini) | ${agg['cost_shadow_openai_usd']:.6f} | "
+        f"${agg['cost_shadow_openai_usd']/n:.6f} | hypothetical same load |"
+    )
     lines.append("")
     lines.append(f"- Successful: {agg['n_ok']} / {agg['n_queries']}")
     if agg["n_failed"]:
@@ -270,7 +293,24 @@ async def _run_all(
     results: list[EvalResult] = []
     sem = asyncio.Semaphore(concurrency)
 
+    provider_info: dict[str, str] = {}
+
     async with httpx.AsyncClient(timeout=600.0) as client:
+        # Discover active providers from the server
+        try:
+            rr = await client.get(f"{endpoint}/", timeout=10.0)
+            providers = rr.json().get("providers", {}) if rr.status_code == 200 else {}
+            provider_info = {
+                "llm": f"{providers.get('llm','?')}/{providers.get('llm_model','?')}",
+                "embed": f"{providers.get('embed','?')}/{providers.get('embed_model','?')}",
+            }
+            console.print(
+                f"[cyan]Providers: LLM={provider_info['llm']}  "
+                f"Embed={provider_info['embed']}[/cyan]"
+            )
+        except Exception:
+            pass
+
         # Pre-warm: one throwaway request so the LLM is in memory
         # before we start the timed eval.
         console.print("[yellow]Warming up LLM (may take 30-60s on cold start)...[/yellow]")
@@ -306,7 +346,9 @@ async def _run_all(
 
     stamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d_%H-%M-%S")
     md_path = out_dir / f"{stamp}.md"
-    _write_markdown(md_path, queries_path, endpoint, ks, agg, results)
+    _write_markdown(
+        md_path, queries_path, endpoint, ks, agg, results, provider_info=provider_info
+    )
     console.print(f"[green]✓ Report:[/green] {md_path}")
 
     if json_out:
@@ -347,6 +389,11 @@ async def _run_all(
     # Pretty console summary
     console.print()
     console.rule("[bold]Summary[/bold]")
+    if provider_info:
+        console.print(
+            f"  [cyan]providers[/cyan]: LLM={provider_info.get('llm','?')}  "
+            f"Embed={provider_info.get('embed','?')}"
+        )
     for k in ks:
         p = agg[f"precision@{k}"]["mean"]
         r = agg[f"recall@{k}"]["mean"]
@@ -356,7 +403,8 @@ async def _run_all(
     console.print(f"  [cyan]mean latency[/cyan]: {agg['latency_ms']['mean']:.0f} ms")
     console.print()
     console.print(
-        f"  [bold]cost:[/bold] real=${agg['cost_real_usd']:.6f}   "
+        f"  [bold]cost (total):[/bold]  real=${agg['cost_real_usd']:.6f}   "
+        f"shadow_nim=${agg['cost_shadow_nim_usd']:.6f}   "
         f"shadow_openai=${agg['cost_shadow_openai_usd']:.6f}"
     )
 

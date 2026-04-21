@@ -74,10 +74,24 @@ app.include_router(ingest.router)
 
 
 @app.get("/", tags=["meta"])
-async def root() -> dict[str, str]:
+async def root() -> dict[str, object]:
     return {
         "name": "proptech-semantic-search",
         "version": __version__,
         "docs": "/docs",
         "metrics": "/metrics",
+        "providers": {
+            "llm": settings.llm_provider,
+            "embed": settings.embed_provider,
+            "llm_model": (
+                settings.nim_llm_model if settings.llm_provider == "nim"
+                else settings.openai_llm_model if settings.llm_provider == "openai"
+                else settings.ollama_llm_model
+            ),
+            "embed_model": (
+                settings.nim_embed_model if settings.embed_provider == "nim"
+                else settings.openai_embed_model if settings.embed_provider == "openai"
+                else settings.ollama_embed_model
+            ),
+        },
     }
