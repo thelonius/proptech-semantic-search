@@ -53,6 +53,7 @@ class CallRecord:
     latency_s: float
     real_cost_usd: float
     shadow_openai_usd: float
+    shadow_nim_usd: float
     cache_hit: bool = False
 
 
@@ -75,6 +76,10 @@ class RequestUsage:
         return sum(c.shadow_openai_usd for c in self.calls)
 
     @property
+    def total_shadow_nim_usd(self) -> float:
+        return sum(c.shadow_nim_usd for c in self.calls)
+
+    @property
     def total_input_tokens(self) -> int:
         return sum(c.input_tokens for c in self.calls)
 
@@ -89,26 +94,35 @@ def current_usage() -> RequestUsage | None:
 
 
 def _openai_shadow_cost(kind: Kind, input_tokens: int, output_tokens: int) -> float:
-    """Compute equivalent OpenAI cost for comparison."""
+    """Cost if the workload had run on OpenAI (gpt-4o-mini + embedding-3-small)."""
     s = settings
     if kind == "completion":
         return (
             input_tokens / 1000.0 * s.openai_gpt4o_mini_input_per_1k
             + output_tokens / 1000.0 * s.openai_gpt4o_mini_output_per_1k
         )
-    # embedding — OpenAI charges only on input
     return input_tokens / 1000.0 * s.openai_embed_small_per_1k
 
 
+def _nim_shadow_cost(kind: Kind, input_tokens: int, output_tokens: int) -> float:
+    """Cost if the workload had run on NVIDIA NIM (llama-3.3-70b + nv-embedqa-e5)."""
+    s = settings
+    if kind == "completion":
+        return (
+            input_tokens / 1000.0 * s.nim_llama70b_input_per_1k
+            + output_tokens / 1000.0 * s.nim_llama70b_output_per_1k
+        )
+    return input_tokens / 1000.0 * s.nim_embed_per_1k
+
+
 def _real_cost(provider: str, kind: Kind, input_tokens: int, output_tokens: int) -> float:
-    """Real USD cost based on provider."""
+    """What we actually paid for this call."""
     if provider == "ollama":
         return 0.0
     if provider == "openai":
         return _openai_shadow_cost(kind, input_tokens, output_tokens)
     if provider == "nim":
-        # NIM pricing varies; for demo we treat as OpenAI-equivalent
-        return _openai_shadow_cost(kind, input_tokens, output_tokens)
+        return _nim_shadow_cost(kind, input_tokens, output_tokens)
     return 0.0
 
 
@@ -129,7 +143,8 @@ def record_call(
     accumulator so the cost middleware can add X-Cost-USD header.
     """
     real = _real_cost(provider, kind, input_tokens, output_tokens)
-    shadow = _openai_shadow_cost(kind, input_tokens, output_tokens)
+    shadow_oai = _openai_shadow_cost(kind, input_tokens, output_tokens)
+    shadow_nim = _nim_shadow_cost(kind, input_tokens, output_tokens)
     rec = CallRecord(
         provider=provider,
         model=model,
@@ -138,7 +153,8 @@ def record_call(
         output_tokens=output_tokens,
         latency_s=latency_s,
         real_cost_usd=real,
-        shadow_openai_usd=shadow,
+        shadow_openai_usd=shadow_oai,
+        shadow_nim_usd=shadow_nim,
         cache_hit=cache_hit,
     )
 
@@ -158,7 +174,8 @@ def record_call(
     metrics.llm_cost_usd_total.labels(
         provider=provider, model=model, kind=kind
     ).inc(real)
-    metrics.llm_cost_usd_shadow_openai_total.labels(kind=kind).inc(shadow)
+    metrics.llm_cost_usd_shadow_openai_total.labels(kind=kind).inc(shadow_oai)
+    metrics.llm_cost_usd_shadow_nim_total.labels(kind=kind).inc(shadow_nim)
 
     # Per-request accumulator
     usage = _usage_ctx.get()
@@ -246,6 +263,9 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         response.headers["X-Cost-Shadow-OpenAI-USD"] = (
             f"{usage.total_shadow_openai_usd:.6f}"
         )
+        response.headers["X-Cost-Shadow-NIM-USD"] = (
+            f"{usage.total_shadow_nim_usd:.6f}"
+        )
         response.headers["X-LLM-Calls"] = str(len(usage.calls))
         response.headers["X-LLM-Tokens-In"] = str(usage.total_input_tokens)
         response.headers["X-LLM-Tokens-Out"] = str(usage.total_output_tokens)
@@ -261,5 +281,6 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             tokens_out=usage.total_output_tokens,
             cost_usd=round(usage.total_real_usd, 6),
             shadow_openai_usd=round(usage.total_shadow_openai_usd, 6),
+            shadow_nim_usd=round(usage.total_shadow_nim_usd, 6),
         )
         return response

@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.core.cost import current_usage
 from app.core.logging import get_logger, request_id_ctx
 from app.models.search import Intent, PropertyHit, SearchRequest, SearchResponse
-from app.services.llm import OllamaClient, get_llm, LLMError
+from app.services.llm import LLMClient, get_embed, get_llm, LLMError
 from app.services.qdrant_client import QdrantService, get_qdrant
 
 logger = get_logger(__name__)
@@ -68,7 +68,8 @@ def _compose_retrieval_text(query: str, intent: Intent) -> str:
 async def search(
     req: SearchRequest,
     request: Request,
-    llm: OllamaClient = Depends(get_llm),
+    llm: LLMClient = Depends(get_llm),
+    embed: LLMClient = Depends(get_embed),
     qdrant: QdrantService = Depends(get_qdrant),
 ) -> SearchResponse:
     stages: dict[str, float] = {}
@@ -94,7 +95,7 @@ async def search(
     t0 = time.perf_counter()
     retrieval_text = _compose_retrieval_text(req.query, intent)
     try:
-        vectors = await llm.embed(inputs=retrieval_text)
+        vectors = await embed.embed(inputs=retrieval_text)
         qvec = vectors[0]
     except LLMError as e:
         logger.error("embed_failed", error=str(e))

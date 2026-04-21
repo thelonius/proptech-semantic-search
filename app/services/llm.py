@@ -264,33 +264,246 @@ class OllamaClient:
         return _parse_json_loose(content)
 
 
-# ---------- singleton ----------
+class OpenAICompatibleClient:
+    """OpenAI-compatible client — works for NVIDIA NIM and real OpenAI.
 
-_client: OllamaClient | None = None
-
-
-def get_llm() -> OllamaClient:
-    """Return the active LLM client.
-
-    For the demo we default to Ollama. If LLM_PROVIDER=openai we'd add an
-    OpenAI-compatible client here; deliberately not adding yet to keep scope tight.
+    NIM exposes /v1/chat/completions and /v1/embeddings with OpenAI's schema,
+    so the same code handles both. The `provider` label differentiates them
+    in cost/metrics tracking.
     """
-    global _client
-    if _client is None:
-        if settings.llm_provider != "ollama":
-            raise NotImplementedError(
-                f"Provider {settings.llm_provider!r} not wired yet — use ollama."
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        base_url: str,
+        api_key: str,
+        llm_model: str,
+        embed_model: str,
+    ) -> None:
+        if not api_key:
+            raise LLMError(f"{provider.upper()}_API_KEY is not set")
+        self.provider = provider
+        self.base_url = base_url.rstrip("/")
+        self.llm_model = llm_model
+        self.embed_model = embed_model
+        # NIM free tier has noticeable jitter (some calls ~1s, some ~30s for 70B).
+        # Give ourselves headroom; tenacity retries handle transient timeouts.
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(180.0, connect=15.0),
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+        reraise=True,
+    )
+    async def chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_mode: bool = False,
+        temperature: float = 0.2,
+        model: str | None = None,
+        think: bool = False,  # unused; accepted for interface parity with Ollama
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        mdl = model or self.llm_model
+        payload: dict[str, Any] = {
+            "model": mdl,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if json_mode:
+            # OpenAI spec — NIM accepts the same
+            payload["response_format"] = {"type": "json_object"}
+
+        start = time.perf_counter()
+        status = "ok"
+        in_tokens = 0
+        out_tokens = 0
+        try:
+            r = await self._client.post("/chat/completions", json=payload)
+            r.raise_for_status()
+            data = r.json()
+            content = (
+                data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
             )
-        _client = OllamaClient(
+            usage = data.get("usage") or {}
+            in_tokens = int(usage.get("prompt_tokens") or 0)
+            out_tokens = int(usage.get("completion_tokens") or 0)
+            if in_tokens == 0:
+                in_tokens = _count_tokens_openai(
+                    "\n".join(m.get("content", "") for m in messages)
+                )
+            if out_tokens == 0:
+                out_tokens = _count_tokens_openai(content)
+            return {"content": content, "raw": data}
+        except httpx.HTTPError as e:
+            status = "error"
+            err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            logger.error(f"{self.provider}_chat_failed", error=err_msg, model=mdl)
+            raise LLMError(f"{self.provider} chat failed: {err_msg}") from e
+        finally:
+            latency = time.perf_counter() - start
+            record_call(
+                provider=self.provider,
+                model=mdl,
+                kind="completion",
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                latency_s=latency,
+                status=status,
+            )
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+        reraise=True,
+    )
+    async def embed(
+        self,
+        *,
+        inputs: str | list[str],
+        model: str | None = None,
+    ) -> list[list[float]]:
+        mdl = model or self.embed_model
+        texts = [inputs] if isinstance(inputs, str) else list(inputs)
+
+        start = time.perf_counter()
+        status = "ok"
+        in_tokens = 0
+        try:
+            payload: dict[str, Any] = {"model": mdl, "input": texts}
+            # NIM-specific: some NV models require input_type
+            if self.provider == "nim":
+                payload["input_type"] = "query"
+                payload["encoding_format"] = "float"
+            r = await self._client.post("/embeddings", json=payload)
+            r.raise_for_status()
+            data = r.json()
+            vectors = [item["embedding"] for item in data.get("data", [])]
+            usage = data.get("usage") or {}
+            in_tokens = int(usage.get("prompt_tokens") or 0) or sum(
+                _count_tokens_openai(t) for t in texts
+            )
+            return vectors
+        except httpx.HTTPError as e:
+            status = "error"
+            logger.error(f"{self.provider}_embed_failed", error=str(e), model=mdl)
+            raise LLMError(f"{self.provider} embed failed: {e}") from e
+        finally:
+            latency = time.perf_counter() - start
+            record_call(
+                provider=self.provider,
+                model=mdl,
+                kind="embedding",
+                input_tokens=in_tokens,
+                output_tokens=0,
+                latency_s=latency,
+                status=status,
+            )
+
+    async def parse_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.0,
+    ) -> dict[str, Any]:
+        out = await self.chat(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            json_mode=True,
+            temperature=temperature,
+        )
+        return _parse_json_loose(out["content"])
+
+
+# ---------- union type + factory ----------
+
+# The two clients expose the same call surface. We use them interchangeably
+# via duck-typing (no formal Protocol needed for the size of this codebase).
+LLMClient = OllamaClient | OpenAICompatibleClient
+
+
+def _make_client(provider: str) -> LLMClient:
+    if provider == "ollama":
+        return OllamaClient(
             base_url=settings.ollama_base_url,
             llm_model=settings.ollama_llm_model,
             embed_model=settings.ollama_embed_model,
         )
-    return _client
+    if provider == "nim":
+        return OpenAICompatibleClient(
+            provider="nim",
+            base_url=settings.nim_base_url,
+            api_key=settings.nim_api_key,
+            llm_model=settings.nim_llm_model,
+            embed_model=settings.nim_embed_model,
+        )
+    if provider == "openai":
+        return OpenAICompatibleClient(
+            provider="openai",
+            base_url="https://api.openai.com/v1",
+            api_key=settings.openai_api_key,
+            llm_model=settings.openai_llm_model,
+            embed_model=settings.openai_embed_model,
+        )
+    raise LLMError(f"Unknown provider: {provider!r}")
+
+
+# Two separate singletons — LLM (chat) and embed may be different providers.
+# Key reason: Qdrant collection has a fixed vector dim tied to embed provider;
+# switching LLM is free, switching embed requires re-indexing.
+_llm_client: LLMClient | None = None
+_embed_client: LLMClient | None = None
+
+
+def get_llm() -> LLMClient:
+    """Return the chat/completion client by LLM_PROVIDER."""
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = _make_client(settings.llm_provider)
+    return _llm_client
+
+
+def get_embed() -> LLMClient:
+    """Return the embeddings client by EMBED_PROVIDER.
+
+    Often the same provider as LLM, but may differ to keep Qdrant collection
+    dim compatible. Reuses the LLM client when providers match to save
+    connection pool setup.
+    """
+    global _embed_client
+    if _embed_client is None:
+        if settings.embed_provider == settings.llm_provider:
+            _embed_client = get_llm()
+        else:
+            _embed_client = _make_client(settings.embed_provider)
+    return _embed_client
 
 
 async def close_llm() -> None:
-    global _client
-    if _client is not None:
-        await _client.close()
-        _client = None
+    global _llm_client, _embed_client
+    if _embed_client is not None and _embed_client is not _llm_client:
+        await _embed_client.close()
+    _embed_client = None
+    if _llm_client is not None:
+        await _llm_client.close()
+    _llm_client = None

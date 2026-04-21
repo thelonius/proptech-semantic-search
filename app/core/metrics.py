@@ -59,11 +59,19 @@ llm_cost_usd_total = Counter(
     registry=registry,
 )
 
-# "Shadow" cost — what the same workload would have cost on OpenAI.
-# Shown on Grafana alongside real cost — proves value of local Ollama.
+# "Shadow" costs — what the same workload would have cost on each provider.
+# Shown on Grafana alongside real cost — lets us compare Ollama / NIM / OpenAI
+# for the exact same query load.
 llm_cost_usd_shadow_openai_total = Counter(
     "psem_llm_cost_usd_shadow_openai_total",
-    "Cumulative USD cost IF we had used OpenAI (for local-vs-cloud comparison)",
+    "Cumulative USD cost IF we had used OpenAI (for provider comparison)",
+    ["kind"],
+    registry=registry,
+)
+
+llm_cost_usd_shadow_nim_total = Counter(
+    "psem_llm_cost_usd_shadow_nim_total",
+    "Cumulative USD cost IF we had used NVIDIA NIM (70B) (for provider comparison)",
     ["kind"],
     registry=registry,
 )

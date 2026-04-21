@@ -26,8 +26,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
-    # --- llm provider routing ---
+    # --- provider routing ---
+    # LLM (chat/completion): can be any provider — affects quality/latency/cost
     llm_provider: Literal["ollama", "openai", "nim"] = "ollama"
+    # Embeddings: sticky to one provider because Qdrant collection is
+    # created with a specific vector dim (768 for nomic, 1024 for nv-embedqa,
+    # 1536 for openai text-embedding-3-small). Switching embed provider means
+    # re-indexing. Default stays on ollama to match the existing 768-dim collection.
+    embed_provider: Literal["ollama", "openai", "nim"] = "ollama"
 
     # Ollama (default, local, $0)
     ollama_base_url: str = "http://localhost:11434"
@@ -42,14 +48,20 @@ class Settings(BaseSettings):
     # NIM (optional)
     nim_api_key: str = ""
     nim_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nim_llm_model: str = "meta/llama-3.3-70b-instruct"
+    nim_embed_model: str = "nvidia/nv-embedqa-e5-v5"
 
     # --- cost table (USD per 1K tokens) ---
-    # Used by cost middleware to estimate $ per request.
-    # Ollama is local so all its multipliers are 0 — but we still count tokens
-    # to show "would have cost $X on OpenAI".
+    # Real cost = what the active provider charges.
+    # Shadow cost = what the same workload would have cost on OpenAI and NIM —
+    # shown side-by-side in the demo so founders can compare providers.
     openai_gpt4o_mini_input_per_1k: float = 0.00015
     openai_gpt4o_mini_output_per_1k: float = 0.0006
     openai_embed_small_per_1k: float = 0.00002
+
+    nim_llama70b_input_per_1k: float = 0.0008
+    nim_llama70b_output_per_1k: float = 0.0008
+    nim_embed_per_1k: float = 0.000016
 
     # --- qdrant ---
     qdrant_url: str = "http://localhost:6333"

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Intent(BaseModel):
@@ -33,6 +33,13 @@ class Intent(BaseModel):
 
     # LLM explanation of how it understood the query — good for debugging
     rationale: str = ""
+
+    # Some LLMs (llama-3.1-8b) emit `null` for empty list fields instead of `[]`.
+    # Coerce None -> [] at parse time so we don't need a schema rewrite.
+    @field_validator("pets", "preferred_locations", "implicit_needs", "style_preferences", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v: object) -> object:
+        return [] if v is None else v
 
 
 class PropertyHit(BaseModel):
